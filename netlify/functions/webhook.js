@@ -1,213 +1,164 @@
-const ADMIN_PHONE = '249901815039';
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const { createClient } = require('@supabase/supabase-client');
+const axios = require('axios');
+
+// ربط قاعدة بيانات Supabase تلقائياً من متغيرات البيئة
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// إعدادات الإدارة وواتساب
+const MY_NUMBER = '249901815039'; 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// قاعدة بيانات مؤقتة في الذاكرة
-let dollarRate = 5300;
-const sessions = {};
-
-const products = {
-  pubg: [
-    { name: '60 UC', price: 5270 },
-    { name: '120 UC', price: 10740 },
-    { name: '180 UC', price: 15510 },
-    { name: '240 UC', price: 20280 },
-    { name: '325 UC', price: 25050 },
-    { name: '385 UC', price: 30085 },
-    { name: '445 UC', price: 34855 },
-    { name: '660 UC', price: 49430 },
-    { name: '720 UC', price: 54200 },
-    { name: '1045 UC', price: 78315 },
-    { name: '1370 UC', price: 102430 },
-    { name: '1800 UC', price: 121775 },
-    { name: '2460 UC', price: 170005 },
-    { name: '3850 UC', price: 242350 },
-    { name: '4510 UC', price: 290580 },
-    { name: '8100 UC', price: 483500 },
-    { name: '16200 UC', price: 965800 },
-  ],
-  freefire: [
-    { name: '110 جوهرة', price: 5747 },
-    { name: '231 جوهرة', price: 11194 },
-    { name: '583 جوهرة', price: 27182 },
-    { name: '1188 جوهرة', price: 53617 },
-    { name: '2420 جوهرة', price: 106334 },
-  ],
-  googleplay: [
-    { name: 'بطاقة 5$', price: 34925 },
-    { name: 'بطاقة 10$', price: 62750 },
-    { name: 'بطاقة 20$', price: 118600 },
-    { name: 'بطاقة 50$', price: 285550 },
-    { name: 'بطاقة 100$', price: 563800 },
-  ],
-};
-
-const PAYMENT_INFO = `💳 بيانات الدفع:
-الاسم: فايزه الصادق هارون البشاري
-رقم الحساب: 2905630
-⚠️ التعليق الإلزامي: من اسمك الكريم الى رايزي مقابل خدمه`;
-
-exports.handler = async (event) => {
-  if (event.httpMethod === 'GET') {
-    const p = event.queryStringParameters;
-    if (p['hub.mode'] === 'subscribe' && p['hub.verify_token'] === VERIFY_TOKEN) {
-      return { statusCode: 200, body: p['hub.challenge'] };
-    }
-    return { statusCode: 403, body: 'Forbidden' };
-  }
-
-  if (event.httpMethod === 'POST') {
-    try {
-      const body = JSON.parse(event.body);
-      const msg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-      if (!msg) return { statusCode: 200, body: 'OK' };
-
-      const from = msg.from;
-      const text = msg.text?.body?.trim() || '';
-
-      // تجاهل المجموعات
-      if (msg.to && msg.to.includes('@g.us')) return { statusCode: 200, body: 'OK' };
-
-      // أوامر الإدارة
-      if (from === ADMIN_PHONE) {
-        if (text.startsWith('دولار ')) {
-          const rate = parseInt(text.replace('دولار ', ''));
-          if (!isNaN(rate)) {
-            dollarRate = rate;
-            await send(from, `✅ تم تحديث سعر الدولار إلى ${rate} جنيه`);
-            return { statusCode: 200, body: 'OK' };
-          }
+exports.handler = async (event, context) => {
+    // 1. التحقق من الـ Webhook عند الربط (Verification)
+    if (event.httpMethod === 'GET') {
+        const mode = event.queryStringParameters['hub.mode'];
+        const token = event.queryStringParameters['hub.verify_token'];
+        const challenge = event.queryStringParameters['hub.challenge'];
+        
+        const verifyToken = process.env.VERIFY_TOKEN || 'RAIZ3Y_TOKEN';
+        if (mode && token === verifyToken) {
+            return { statusCode: 200, body: challenge };
         }
-      }
-
-      await handleSession(from, text);
-    } catch (e) {
-      console.error('Error:', e.message);
+        return { statusCode: 403, body: 'Forbidden' };
     }
-    return { statusCode: 200, body: 'EVENT_RECEIVED' };
-  }
 
-  return { statusCode: 405, body: 'Method Not Allowed' };
+    // 2. استقبال الرسائل من العميل (POST)
+    if (event.httpMethod === 'POST') {
+        try {
+            const body = JSON.parse(event.body);
+            
+            if (!body.entry || !body.entry[0].changes || !body.entry[0].changes[0].value.messages) {
+                return { statusCode: 200, body: 'EVENT_RECEIVED' };
+            }
+
+            const messageData = body.entry[0].changes[0].value.messages[0];
+            const senderNumber = messageData.from;
+            const messageType = messageData.type;
+            const isGroup = messageData.chat_id && messageData.chat_id.includes('-'); 
+
+            // 🛑 شرط صارم: البوت لا يرد تلقائياً في المجموعات أبداً
+            if (isGroup) {
+                return { statusCode: 200, body: 'GROUP_IGNORE' };
+            }
+
+            // جلب حالة العميل من قاعدة البيانات
+            let { data: session } = await supabase
+                .from('customer_sessions')
+                .select('*')
+                .eq('phone_number', senderNumber)
+                .single();
+
+            // جلب سعر الدولار الحالي
+            let { data: rateData } = await supabase
+                .from('settings')
+                .select('value')
+                .eq('key', 'dollar_rate')
+                .single();
+            const dollarRate = parseFloat(rateData?.value || 2000);
+
+            // 👮‍♂️ إدارة الأوامر من صاحب المتجر (رقمك الخاص)
+            if (senderNumber === MY_NUMBER && messageType === 'text') {
+                const adminText = messageData.text.body.trim();
+
+                if (adminText.startsWith('تحديث الدولار')) {
+                    const newRate = adminText.split(' ')[2];
+                    if (newRate && !isNaN(newRate)) {
+                        await supabase.from('settings').upsert({ key: 'dollar_rate', value: newRate });
+                        await sendWhatsAppMessage(MY_NUMBER, `✅ تم تحديث سعر الدولار بنجاح إلى: ${newRate}`);
+                        return { statusCode: 200, body: 'RATE_UPDATED' };
+                    }
+                }
+
+                if (adminText.startsWith('اغلاق')) {
+                    const clientNum = adminText.split(' ')[1];
+                    if (clientNum) {
+                        await supabase.from('customer_sessions').upsert({ phone_number: clientNum, status: 'bot' });
+                        await sendWhatsAppMessage(MY_NUMBER, `✅ تم إغلاق التذكرة للرقم ${clientNum} وإعادة تشغيل البوت له.`);
+                        await sendWhatsAppMessage(clientNum, `🌟 شكراً لتواصلك معنا. تم إنهاء المحادثة مع الموظف وإعادة تشغيل البوت التلقائي لخدمتك.`);
+                        return { statusCode: 200, body: 'TICKET_CLOSED' };
+                    }
+                }
+            }
+
+            // ⏳ إذا كانت حالة العميل "تحت دعم الموظف"، يتجاهل البوت الرسالة تماماً لكي تتحدث معه بحرية
+            if (session && session.status === 'support') {
+                return { statusCode: 200, body: 'SUPPORT_MODE' };
+            }
+
+            // 🤖 معالجة ردود البوت التلقائية (الرسائل النصية والقوائم)
+            if (messageType === 'text') {
+                const userText = messageData.text.body.toLowerCase().trim();
+
+                if (userText === 'مرحبا' || userText === 'سلام' || userText === 'البداية' || userText === 'بوت') {
+                    const welcomeMsg = `🌟 أهلاً بك في متجر 𝐑𝐀𝐈𝐙3𝐘 𝐒𝐓𝐎𝐑𝐄 🌟\n\n` +
+                                       `بوت الخدمة الذاتية في خدمتك لتلبية طلباتك بسرعة وأمان ⚡.\n\n` +
+                                       `أسعار اليوم (سعر الدولار الحالي: ${dollarRate}):\n` +
+                                       `1. 🎮 شحن ببجي موبايل (60 UC) = ${(0.99 * dollarRate).toFixed(0)}\n` +
+                                       `2. ⚽ شحن بيس فوتبول (100 Coin) = ${(1.2 * dollarRate).toFixed(0)}\n` +
+                                       `3. 📱 اشتراكات التطبيقات والمواقع (Netflix) = ${(5 * dollarRate).toFixed(0)}\n` +
+                                       `4. 💳 خدمات VISA وبطاقات جوجل بلاي\n` +
+                                       `5. 📡 اشتراكات ستارلينك وحلولها\n` +
+                                       `6. 🧾 دفع الفواتير وشحن الألعاب عند الطلب\n\n` +
+                                       `✍️ للطلب أو الاستفسار، أو للتحدث مع الإدارة مباشرة، أرسل رقم الخيار أو اكتب *دعم* للتحدث مع موظف.`;
+                    
+                    await sendWhatsAppMessage(senderNumber, welcomeMsg);
+                    return { statusCode: 200, body: 'WELCOME_SENT' };
+                }
+
+                if (userText === 'دعم' || userText === '6' || userText.includes('موظف')) {
+                    await supabase.from('customer_sessions').upsert({ phone_number: senderNumber, status: 'support' });
+                    await sendWhatsAppMessage(senderNumber, `⏳ تم إيقاف البوت وتحويلك إلى موظف الخدمة الآن. سيقوم أحد المشرفين بالرد عليك قريباً، شكراً لانتظارك!`);
+                    
+                    const adminAlert = `🚨 العميل يطلب التحدث مع الموظف!\n👉 رقم العميل: ${senderNumber}\n🔗 للتحدث معه مباشرة اضغط هنا: https://wa.me/${senderNumber}`;
+                    await sendWhatsAppMessage(MY_NUMBER, adminAlert);
+                    return { statusCode: 200, body: 'SUPPORT_TRANSITION' };
+                }
+
+                if (userText === '1') {
+                    const localPrice = (0.99 * dollarRate).toFixed(0);
+                    await sendWhatsAppMessage(senderNumber, `🎮 لقد اخترت شحن ببجي موبايل.\n💵 السعر الحالي: ${localPrice}\n\nيرجى تحويل المبلغ إلى الحساب البنكي التالي:\n🏦 بنكك: 1234567\n👤 باسم: متجر Raiz3y\n\n🔴 بعد التحويل، يرجى إرسال *صورة إشعار التحويل* هنا فوراً لتأكيد طلبك.`);
+                    
+                    await supabase.from('orders').insert({
+                        phone_number: senderNumber,
+                        service_name: 'شحن ببجي موبايل',
+                        price_local: localPrice,
+                        status: 'pending'
+                    });
+                    return { statusCode: 200, body: 'ORDER_INITIATED' };
+                }
+            }
+
+            if (messageType === 'image') {
+                await sendWhatsAppMessage(senderNumber, `📥 شكراً لك، تم استلام إشعار التحويل بنجاح. جاري التحقق من عملية الدفع الآن من قبل المشرفين وتنفيذ طلبك في أسرع وقت. ⌛`);
+                
+                const adminOrderMsg = `💰 طلب جديد قيد التنفيذ!\n👤 من الرقم: ${senderNumber}\n📸 تم إرسال إشعار التحويل بنجاح.\nيرجى مراجعة الحساب البنكي وتنفيذ الطلب، ثم أرسل (اغلاق ${senderNumber}) لإعادة البوت للعميل عند الانتهاء.`;
+                await sendWhatsAppMessage(MY_NUMBER, adminOrderMsg);
+                return { statusCode: 200, body: 'RECEIPT_RECEIVED' };
+            }
+
+        } catch (error) {
+            console.error('Error handling webhook:', error);
+            return { statusCode: 500, body: 'Internal Error' };
+        }
+    }
+
+    return { statusCode: 200, body: 'OK' };
 };
 
-async function handleSession(from, text) {
-  if (!sessions[from]) sessions[from] = { step: 'start' };
-  const session = sessions[from];
-
-  if (text === 'رجوع' || text === 'القائمة الرئيسية' || text === 'مرحبا' || text === 'هلا' || text === 'السلام عليكم' || session.step === 'start') {
-    session.step = 'main_menu';
-    await send(from, `🎮 أهلاً بك في *RAIZEY STORE* 🛒
-
-اختر الخدمة بإرسال الرقم:
-
-1️⃣ شحن ببجي موبايل 🎯
-2️⃣ شحن فري فاير 🔥
-3️⃣ بطاقات جوجل بلاي 🎁
-4️⃣ اشتراكات وخدمات أخرى 📱
-5️⃣ التحدث مع الدعم 🙋
-
-اكتب رقم الخدمة المطلوبة ⬇️`);
-    return;
-  }
-
-  if (session.step === 'main_menu') {
-    if (text === '1') { session.step = 'show_products'; session.category = 'pubg'; }
-    else if (text === '2') { session.step = 'show_products'; session.category = 'freefire'; }
-    else if (text === '3') { session.step = 'show_products'; session.category = 'googleplay'; }
-    else if (text === '4') { await send(from, '📱 للاشتراكات والخدمات الأخرى، تواصل معنا مباشرة:\nwa.me/249901815039'); return; }
-    else if (text === '5') { await send(from, '🙋 فريق الدعم جاهز لمساعدتك:\nwa.me/249901815039'); return; }
-    else { await send(from, '❌ اختيار غير صحيح، أرسل رقم من 1 إلى 5'); return; }
-  }
-
-  if (session.step === 'show_products') {
-    const list = products[session.category];
-    const categoryNames = { pubg: 'ببجي موبايل 🎯', freefire: 'فري فاير 🔥', googleplay: 'جوجل بلاي 🎁' };
-    let msg = `${categoryNames[session.category]}\n\nاختر الباقة بإرسال رقمها:\n\n`;
-    list.forEach((p, i) => { msg += `${i + 1}️⃣ ${p.name} — ${p.price.toLocaleString()} جنيه\n`; });
-    msg += '\n↩️ للرجوع أرسل "رجوع"';
-    await send(from, msg);
-    session.step = 'select_product';
-    return;
-  }
-
-  if (session.step === 'select_product') {
-    const list = products[session.category];
-    const idx = parseInt(text) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= list.length) {
-      await send(from, `❌ اختيار غير صحيح، أرسل رقم من 1 إلى ${list.length}`);
-      return;
+async function sendWhatsAppMessage(to, text) {
+    try {
+        await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, {
+            messaging_product: 'whatsapp',
+            to: to,
+            type: 'text',
+            text: { body: text }
+        }, {
+            headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` }
+        });
+    } catch (err) {
+        console.error('Error sending WhatsApp message:', err.response?.data || err.message);
     }
-    session.product = list[idx];
-    session.step = 'confirm';
-    await send(from, `✅ اخترت: *${session.product.name}*
-💰 السعر: *${session.product.price.toLocaleString()} جنيه*
-
-هل تريد المتابعة؟
-1️⃣ نعم، أكمل الطلب
-2️⃣ رجوع للقائمة`);
-    return;
-  }
-
-  if (session.step === 'confirm') {
-    if (text === '1') {
-      session.step = 'get_uid';
-      await send(from, '🎮 أرسل لنا *ID حسابك* في اللعبة:');
-    } else {
-      session.step = 'main_menu';
-      await send(from, '↩️ تم الرجوع، أرسل رقم الخدمة المطلوبة:\n\n1️⃣ ببجي\n2️⃣ فري فاير\n3️⃣ جوجل بلاي\n4️⃣ خدمات أخرى\n5️⃣ دعم');
-    }
-    return;
-  }
-
-  if (session.step === 'get_uid') {
-    session.uid = text;
-    session.step = 'get_name';
-    await send(from, '👤 أرسل لنا *اسم حسابك* في اللعبة:');
-    return;
-  }
-
-  if (session.step === 'get_name') {
-    session.playerName = text;
-    session.step = 'done';
-
-    await send(from, `🎉 تم تسجيل طلبك بنجاح!
-
-📦 *تفاصيل الطلب:*
-🎮 المنتج: ${session.product.name}
-💰 السعر: ${session.product.price.toLocaleString()} جنيه
-🆔 ID: ${session.uid}
-👤 الاسم: ${session.playerName}
-
-${PAYMENT_INFO}
-
-بعد التحويل أرسل كلمة *"تم الدفع"* وسيتم تنفيذ طلبك في أقرب وقت 🚀`);
-
-    // إشعار للأدمن
-    await send(ADMIN_PHONE, `🔔 *طلب جديد!*
-📱 العميل: ${from}
-🎮 المنتج: ${session.product.name}
-💰 السعر: ${session.product.price.toLocaleString()} جنيه
-🆔 ID: ${session.uid}
-👤 الاسم: ${session.playerName}`);
-
-    session.step = 'start';
-    return;
-  }
-
-  if (text === 'تم الدفع') {
-    await send(from, '✅ شكراً! تم استلام إشعار دفعك، سيتم تنفيذ طلبك قريباً 🚀\nللاستفسار تواصل معنا: wa.me/249901815039');
-    return;
-  }
-
-  // أي رسالة ثانية
-  await send(from, '👋 أهلاً! أرسل أي شيء للبدء أو اكتب "رجوع" للقائمة الرئيسية');
-}
-
-async function send(to, text) {
-  await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messaging_product: 'whatsapp', to, text: { body: text } }),
-  });
 }
