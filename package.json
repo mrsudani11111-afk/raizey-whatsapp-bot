@@ -1,0 +1,8 @@
+{
+  "name": "raizey-whatsapp-bot",
+  "version": "1.0.0",
+  "dependencies": {
+    "@supabase/supabase-client": "^2.0.0"
+  }
+}
+
